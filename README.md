@@ -27,7 +27,7 @@ Download the experimental data from Zenodo (DOI: [10.5281/zenodo.18138856](https
 python scripts/reproduce_tables.py --download --data-dir ./data
 ```
 
-This downloads ~23GB of data including:
+This downloads ~10GB (compressed) including:
 - `results/` - Per-model experimental results
 - `results_common/` - Cross-model transfer experiments
 
@@ -74,16 +74,20 @@ python scripts/reproduce_tables.py --data-dir ./data --table fig4
 
 MedQA, MedXpertQA-R, MedXpertQA-U, AfriMedQA, MedBullets, MedExQA, MedMCQA, MMLU-Pro, MMLU (medical), PubMedQA
 
+## Author
+
+Enrico D'Urso
+
 ## Citation
 
 ```bibtex
 @article{hidden-uncertainty-med-qa,
   title={Hidden-uncertainty Assessment via Non-verbalized Signatures for Medical QA},
-  author={...},
-  year={2025}
+  author={D'Urso, Enrico},
+  year={2026}
 }
 ```
 
 ## License
 
-MIT
+Apache 2.0

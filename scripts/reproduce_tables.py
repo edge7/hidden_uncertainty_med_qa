@@ -18,6 +18,7 @@ import json
 import pickle
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from collections import defaultdict
 
@@ -321,8 +322,9 @@ def table_8_disagreement(data_dir: Path, threshold: float = 0.3) -> pd.DataFrame
     """
     Reproduce Table 8: Error rate stratified by disagreement magnitude.
 
-    Disagreement = |classifier_prob - self_verbalized_prob|
+    Disagreement = |lr_prob - self_verbalized_prob|
     High disagreement (d > threshold) indicates hidden uncertainty.
+    Values are macro-averaged across datasets.
     """
     results = []
 
@@ -332,38 +334,48 @@ def table_8_disagreement(data_dir: Path, threshold: float = 0.3) -> pd.DataFrame
         if run_dir is None:
             continue
 
+        with open(run_dir / "predictions_no_selfverb.json") as f:
+            pred_no_sv = pd.DataFrame(json.load(f))
         with open(run_dir / "predictions_with_selfverb.json") as f:
-            pred = pd.DataFrame(json.load(f))
+            pred_with_sv = pd.DataFrame(json.load(f))
 
         # Normalize self-verbalized to [0,1]
-        pred["sv_norm"] = pred["verbalized_confidence"] / 100.0
+        pred_no_sv["sv_norm"] = pred_no_sv["verbalized_confidence"] / 100.0
+        pred_with_sv["sv_norm"] = pred_with_sv["verbalized_confidence"] / 100.0
 
-        # Calculate disagreement (using RF calibrated as the classifier)
-        pred["disagreement"] = np.abs(pred["rf_prob_calibrated"] - pred["sv_norm"])
+        row = {"Model": MODEL_SHORT_NAMES[model]}
 
-        # Split by disagreement level
-        low_mask = pred["disagreement"] <= threshold
-        high_mask = pred["disagreement"] > threshold
+        # LR (no SV) disagreement
+        pred_no_sv["disagreement"] = np.abs(pred_no_sv["lr_prob"] - pred_no_sv["sv_norm"])
+        low_errs_no, high_errs_no = [], []
+        for ds in pred_no_sv["dataset"].unique():
+            ds_df = pred_no_sv[pred_no_sv["dataset"] == ds]
+            low_mask = ds_df["disagreement"] <= threshold
+            high_mask = ds_df["disagreement"] > threshold
+            if low_mask.sum() > 0:
+                low_errs_no.append((1 - ds_df.loc[low_mask, "y_true"].mean()) * 100)
+            if high_mask.sum() > 0:
+                high_errs_no.append((1 - ds_df.loc[high_mask, "y_true"].mean()) * 100)
 
-        # Compute error rates per dataset, then average (unweighted)
-        low_errors, high_errors = [], []
-        for ds in pred["dataset"].unique():
-            ds_mask = pred["dataset"] == ds
+        row["noSV_Low"] = np.mean(low_errs_no) if low_errs_no else np.nan
+        row["noSV_High"] = np.mean(high_errs_no) if high_errs_no else np.nan
+        row["noSV_Ratio"] = row["noSV_High"] / row["noSV_Low"] if row["noSV_Low"] > 0 else np.nan
 
-            low_ds = pred[ds_mask & low_mask]
-            high_ds = pred[ds_mask & high_mask]
+        # LR (with SV) disagreement
+        pred_with_sv["disagreement"] = np.abs(pred_with_sv["lr_prob"] - pred_with_sv["sv_norm"])
+        low_errs_with, high_errs_with = [], []
+        for ds in pred_with_sv["dataset"].unique():
+            ds_df = pred_with_sv[pred_with_sv["dataset"] == ds]
+            low_mask = ds_df["disagreement"] <= threshold
+            high_mask = ds_df["disagreement"] > threshold
+            if low_mask.sum() > 0:
+                low_errs_with.append((1 - ds_df.loc[low_mask, "y_true"].mean()) * 100)
+            if high_mask.sum() > 0:
+                high_errs_with.append((1 - ds_df.loc[high_mask, "y_true"].mean()) * 100)
 
-            if len(low_ds) > 0:
-                low_errors.append(1 - low_ds["y_true"].mean())
-            if len(high_ds) > 0:
-                high_errors.append(1 - high_ds["y_true"].mean())
-
-        row = {
-            "Model": MODEL_SHORT_NAMES[model],
-            "Low_d (≤0.3)": np.mean(low_errors) * 100 if low_errors else np.nan,
-            "High_d (>0.3)": np.mean(high_errors) * 100 if high_errors else np.nan,
-        }
-        row["Ratio"] = row["High_d (>0.3)"] / row["Low_d (≤0.3)"] if row["Low_d (≤0.3)"] > 0 else np.nan
+        row["wSV_Low"] = np.mean(low_errs_with) if low_errs_with else np.nan
+        row["wSV_High"] = np.mean(high_errs_with) if high_errs_with else np.nan
+        row["wSV_Ratio"] = row["wSV_High"] / row["wSV_Low"] if row["wSV_Low"] > 0 else np.nan
 
         results.append(row)
 
@@ -516,7 +528,7 @@ def figure_4_cross_model_transfer(data_dir: Path, classifier_type: str = 'lr') -
 
 def download_data(output_dir: Path) -> bool:
     """
-    Download data from Zenodo using zenodo_get.
+    Download data from Zenodo using zenodo_get and extract ZIP.
 
     Install with: pip install zenodo_get
     """
@@ -533,7 +545,7 @@ def download_data(output_dir: Path) -> bool:
 
     print(f"Downloading data from Zenodo (DOI: {ZENODO_DOI})...")
     print(f"Output directory: {output_dir}")
-    print("This may take a while (~23GB)...\n")
+    print("This may take a while (~10GB compressed)...\n")
 
     # Use zenodo_get CLI
     try:
@@ -541,12 +553,25 @@ def download_data(output_dir: Path) -> bool:
             ["zenodo_get", ZENODO_DOI, "-o", str(output_dir)],
             check=True
         )
-        print("\nDownload complete!")
-        print(f"Data extracted to: {output_dir}")
-        return True
     except subprocess.CalledProcessError as e:
         print(f"Download failed: {e}")
         return False
+
+    # Extract ZIP file(s)
+    zip_files = list(output_dir.glob("*.zip"))
+    if zip_files:
+        for zip_path in zip_files:
+            print(f"\nExtracting {zip_path.name}...")
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(output_dir)
+            print(f"Extracted to {output_dir}")
+            # Remove ZIP after extraction
+            zip_path.unlink()
+            print(f"Removed {zip_path.name}")
+
+    print("\nDownload and extraction complete!")
+    print(f"Data available at: {output_dir}")
+    return True
 
 
 # =============================================================================
@@ -577,7 +602,22 @@ def print_matrix(matrix: np.ndarray, title: str, labels: list, show_sign: bool =
     print(f"{title}")
     print('='*80)
 
-    short_labels = [MODEL_SHORT_NAMES[m].split('-')[0][:12] for m in labels]
+    # Create short labels for matrix display
+    short_labels = []
+    for m in labels:
+        name = MODEL_SHORT_NAMES[m]
+        if "medium" in name.lower():
+            short_labels.append("GPT-med")
+        elif "high" in name.lower():
+            short_labels.append("GPT-high")
+        elif "DeepSeek" in name:
+            short_labels.append("DeepSeek")
+        elif "Qwen" in name:
+            short_labels.append("Qwen3")
+        elif "Olmo" in name:
+            short_labels.append("Olmo")
+        else:
+            short_labels.append(name[:10])
 
     # Build table data
     table_data = []
@@ -590,9 +630,9 @@ def print_matrix(matrix: np.ndarray, title: str, labels: list, show_sign: bool =
                 row_data.append("N/A")
             else:
                 if show_sign:
-                    row_data.append(f"{val:+.4f}")
+                    row_data.append(f"{val:+.3f}")
                 else:
-                    row_data.append(f"{val:.4f}")
+                    row_data.append(f"{val:.3f}")
         table_data.append(row_data)
 
     headers = ["Source→Target"] + short_labels
